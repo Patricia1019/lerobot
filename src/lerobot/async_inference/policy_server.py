@@ -16,10 +16,10 @@
 Example:
 ```shell
 python -m lerobot.async_inference.policy_server \
-     --host=127.0.0.1 \
+     --host=0.0.0.0 \
      --port=8080 \
-     --fps=30 \
-     --inference_latency=0.033 \
+     --fps=15 \
+     --inference_latency=0.066 \
      --obs_queue_timeout=1
 ```
 """
@@ -61,6 +61,9 @@ from .helpers import (
     observations_similar,
     raw_observation_to_observation,
 )
+import pdb
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 
 class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
@@ -147,6 +150,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy_type = policy_specs.policy_type  # act, pi0, etc.
         self.lerobot_features = policy_specs.lerobot_features
         self.actions_per_chunk = policy_specs.actions_per_chunk
+        rename_map = getattr(policy_specs, "rename_map", {})
 
         policy_class = get_policy_class(self.policy_type)
 
@@ -156,12 +160,13 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         # Load preprocessor and postprocessor, overriding device to match requested device
         device_override = {"device": self.device}
+        # pdb.set_trace()
         self.preprocessor, self.postprocessor = make_pre_post_processors(
             self.policy.config,
             pretrained_path=policy_specs.pretrained_name_or_path,
             preprocessor_overrides={
                 "device_processor": device_override,
-                "rename_observations_processor": {"rename_map": policy_specs.rename_map},
+                "rename_observations_processor": {"rename_map": rename_map},
             },
             postprocessor_overrides={"device_processor": device_override},
         )
@@ -231,7 +236,10 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
                 self._predicted_timesteps.add(obs.get_timestep())
 
             start_time = time.perf_counter()
+            # print("obs", obs)  # for debugging
+            # pdb.set_trace()
             action_chunk = self._predict_action_chunk(obs)
+            print("action_chunk", action_chunk) # for debugging
             inference_time = time.perf_counter() - start_time
 
             start_time = time.perf_counter()
@@ -340,6 +348,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         5. Convert to TimedAction list
         """
         """1. Prepare observation"""
+        # pdb.set_trace()
         start_prepare = time.perf_counter()
         observation: Observation = raw_observation_to_observation(
             observation_t.get_observation(),
@@ -350,6 +359,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         """2. Apply preprocessor"""
         start_preprocess = time.perf_counter()
+        # pdb.set_trace()
         observation = self.preprocessor(observation)
         self.last_processed_obs: TimedObservation = observation_t
         preprocessing_time = time.perf_counter() - start_preprocess
@@ -370,12 +380,14 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         _, chunk_size, _ = action_tensor.shape
 
         # Process each action in the chunk
+        # pdb.set_trace()
         processed_actions = []
         for i in range(chunk_size):
             # Extract action at timestep i: (B, action_dim)
             single_action = action_tensor[:, i, :]
             processed_action = self.postprocessor(single_action)
             processed_actions.append(processed_action)
+        # pdb.set_trace()
 
         # Stack back to (B, chunk_size, action_dim), then remove batch dim
         action_tensor = torch.stack(processed_actions, dim=1).squeeze(0)
@@ -417,7 +429,7 @@ def serve(cfg: PolicyServerConfig):
     Args:
         config: PolicyServerConfig instance. If None, uses default configuration.
     """
-    logging.info(pformat(asdict(cfg)))
+    # logging.info(pformat(asdict(cfg)))
 
     # Create the server instance first
     policy_server = PolicyServer(cfg)
