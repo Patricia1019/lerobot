@@ -1,11 +1,10 @@
-python -m lerobot.async_inference.robot_client_rosbag \
+python -m lerobot.async_inference.robot_client \
   --robot.type=r1lite   \
   --robot.id=black  \
    --task="dummy"  \
     --server_address=128.2.204.110:8080   \
     --policy_type=groot   \
-    --pretrained_name_or_path=/home/peiqi/codes/lerobot/checkpoints/groot/allobj/020000/pretrained_model  \
+    --pretrained_name_or_path=/home/peiqi/codes/lerobot/checkpoints/groot/allobj/037000/pretrained_model  \
     --policy_device=cuda   \
     --actions_per_chunk=3   \
-    --chunk_size_threshold=0.2 \
-    --record_dir=/home/patricia/Desktop/Learn/projects/NeSyManip3D/lerobot/VLA-experiments/recordings/pickandplace/groot-20K-alldata
+    --chunk_size_threshold=0.2

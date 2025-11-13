@@ -1,4 +1,4 @@
-python -m lerobot.async_inference.robot_client_rosbag   \
+python -m lerobot.async_inference.robot_client   \
     --robot.type=r1lite   \
     --robot.id=black   \
     --task="dummy"   \
@@ -8,5 +8,4 @@ python -m lerobot.async_inference.robot_client_rosbag   \
     --policy_device=cuda   \
     --actions_per_chunk=3   \
     --chunk_size_threshold=0.2   \
-    --aggregate_fn_name=weighted_average \
-    --record_dir=/home/patricia/Desktop/Learn/projects/NeSyManip3D/lerobot/VLA-experiments/recordings/pickandplace/act-80K-alldata
+    --aggregate_fn_name=weighted_average
