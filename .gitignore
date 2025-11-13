@@ -181,4 +181,4 @@ outputs/
 
 # ignore all files in these folders
 VLA-experiments/videos/
-recordings/
+recordings/     

@@ -45,6 +45,8 @@ from typing import Any
 import draccus
 import grpc
 import torch
+import os, sys
+import signal
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
@@ -240,11 +242,11 @@ class RobotClient:
         current_action_queue = {action.get_timestep(): action.get_action() for action in internal_queue}
 
         # Debug: log current queued timesteps and incoming timesteps
-        print(
-                "Aggregating actions: current_queue_timesteps=%s incoming_timesteps=%s",
-                sorted(list(current_action_queue.keys())),
-                [a.get_timestep() for a in incoming_actions],
-            )
+        # print(
+        #         "Aggregating actions: current_queue_timesteps=%s incoming_timesteps=%s",
+        #         sorted(list(current_action_queue.keys())),
+        #         [a.get_timestep() for a in incoming_actions],
+        #     )
 
         for new_action in incoming_actions:
             with self.latest_action_lock:
@@ -276,7 +278,7 @@ class RobotClient:
         
         # for debugging
         resulting = sorted([a.get_timestep() for a in self.action_queue.queue])
-        print("Resulting queued timesteps after aggregation: %s", resulting)
+        # print("Resulting queued timesteps after aggregation: %s", resulting)
 
     def receive_actions(self, verbose: bool = False):
         """Receive actions from the policy server"""
@@ -378,7 +380,7 @@ class RobotClient:
         _performed_action = self.robot.send_action(
             self._action_tensor_to_action_dict(timed_action.get_action())
         )
-        print(f"Performed action #{self._action_tensor_to_action_dict(timed_action.get_action())}")
+        # print(f"Performed action #{self._action_tensor_to_action_dict(timed_action.get_action())}")
         with self.latest_action_lock:
             self.latest_action = timed_action.get_timestep()
 
@@ -487,6 +489,28 @@ def async_client(cfg: RobotClientConfig):
         raise ValueError(f"Robot {cfg.robot.type} not yet supported!")
 
     client = RobotClient(cfg)
+
+    # Register signal handlers to ensure we shutdown gracefully and close rosbag files.
+    def _signal_handler(signum, frame):
+        try:
+            client.logger.info(f"Received signal {signum}; shutting down client gracefully...")
+        except Exception:
+            print(f"Received signal {signum}; shutting down client gracefully...")
+        # This will trigger stop() and let finally-block handle cleanup as well.
+        try:
+            client.stop()
+        except Exception:
+            pass
+        # Exit the process — allow outer finally to run when possible.
+        try:
+            sys.exit(0)
+        except SystemExit:
+            # If sys.exit didn't terminate immediately, force exit
+            os._exit(0)
+
+    # catch common termination signals (SIGINT: Ctrl+C, SIGTERM: kill)
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
 
     if client.start():
         client.logger.info("Starting action receiver thread...")
