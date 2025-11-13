@@ -142,6 +142,11 @@ class RobotClientConfig:
         default=False, metadata={"help": "Visualize the action queue size"}
     )
 
+    # Recording directory for rosbag files created by the client
+    record_dir: str = field(
+        default="/home/patricia/Desktop/Learn/projects/NeSyManip3D/lerobot/VLA-experiments/recordings", metadata={"help": "Directory where rosbag recordings will be stored"}
+    )
+
     @property
     def environment_dt(self) -> float:
         """Environment time step, in seconds"""
@@ -190,4 +195,5 @@ class RobotClientConfig:
             "task": self.task,
             "debug_visualize_queue_size": self.debug_visualize_queue_size,
             "aggregate_fn_name": self.aggregate_fn_name,
+            "record_dir": self.record_dir,
         }

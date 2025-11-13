@@ -40,11 +40,36 @@ from collections.abc import Callable
 from dataclasses import asdict
 from pprint import pformat
 from queue import Queue
-from typing import Any
+from typing import Any, Tuple
 
 import draccus
 import grpc
 import torch
+from pathlib import Path
+import signal
+import sys
+import os
+import numpy as np
+
+# Optional ROS imports (guarded so code still runs if ROS not installed)
+# try:
+import rospy  # type: ignore
+import rosbag  # type: ignore
+from sensor_msgs.msg import Image, JointState, CompressedImage  # type: ignore
+from cv_bridge import CvBridge  # type: ignore
+# except Exception:
+#     rospy = None
+#     rosbag = None
+#     Image = None
+#     JointState = None
+#     CompressedImage = None
+#     CvBridge = None
+
+# Optional cv2 for compressing images to JPEG for CompressedImage
+try:
+    import cv2  # type: ignore
+except Exception:
+    cv2 = None
 
 from lerobot.cameras.opencv.configuration_opencv import OpenCVCameraConfig  # noqa: F401
 from lerobot.cameras.realsense.configuration_realsense import RealSenseCameraConfig  # noqa: F401
@@ -79,10 +104,10 @@ from .helpers import (
     map_robot_keys_to_lerobot_features,
     visualize_action_queue_size,
 )
-
+import pdb
 
 class RobotClient:
-    prefix = "robot_client"
+    prefix = "robot_client_rosbag"
     logger = get_logger(prefix)
 
     def __init__(self, config: RobotClientConfig):
@@ -137,6 +162,25 @@ class RobotClient:
         self.must_go = threading.Event()
         self.must_go.set()  # Initially set - observations qualify for direct processing
 
+        # Recording (rosbag) setup
+        self.bag = None
+        self.bag_lock = threading.Lock()
+        self._cv_bridge = CvBridge() if CvBridge is not None else None
+        self._logged_observation_keys = False
+        try:
+            if rosbag is not None:
+                recordings_dir = Path(getattr(self.config, "record_dir", "recordings"))
+                recordings_dir.mkdir(parents=True, exist_ok=True)
+                ts = time.strftime("%Y%m%dT%H%M%S")
+                bag_path = recordings_dir / f"exp_{ts}.bag"
+                # Open bag for writing
+                self.bag = rosbag.Bag(str(bag_path), "w")
+                self.logger.info(f"Opened rosbag for recording: {bag_path}")
+        except Exception as e:
+            # If bag creation fails, continue without recording
+            print(f"Could not open rosbag for recording: {e}")
+            return 
+
     @property
     def running(self):
         return not self.shutdown_event.is_set()
@@ -174,6 +218,19 @@ class RobotClient:
     def stop(self):
         """Stop the robot client"""
         self.shutdown_event.set()
+
+        # Close rosbag if open
+        try:
+            if getattr(self, "bag", None) is not None:
+                with self.bag_lock:
+                    try:
+                        self.bag.close()
+                        self.logger.info("Closed rosbag recording")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to close rosbag: {e}")
+        except Exception:
+            # defensive: ensure stop completes even if bag closing fails
+            pass
 
         self.robot.disconnect()
         self.logger.debug("Robot disconnected")
@@ -240,11 +297,11 @@ class RobotClient:
         current_action_queue = {action.get_timestep(): action.get_action() for action in internal_queue}
 
         # Debug: log current queued timesteps and incoming timesteps
-        print(
-                "Aggregating actions: current_queue_timesteps=%s incoming_timesteps=%s",
-                sorted(list(current_action_queue.keys())),
-                [a.get_timestep() for a in incoming_actions],
-            )
+        # print(
+        #         "Aggregating actions: current_queue_timesteps=%s incoming_timesteps=%s",
+        #         sorted(list(current_action_queue.keys())),
+        #         [a.get_timestep() for a in incoming_actions],
+        #     )
 
         for new_action in incoming_actions:
             with self.latest_action_lock:
@@ -275,8 +332,8 @@ class RobotClient:
             self.action_queue = future_action_queue
         
         # for debugging
-        resulting = sorted([a.get_timestep() for a in self.action_queue.queue])
-        print("Resulting queued timesteps after aggregation: %s", resulting)
+        # resulting = sorted([a.get_timestep() for a in self.action_queue.queue])
+        # print("Resulting queued timesteps after aggregation: %s", resulting)
 
     def receive_actions(self, verbose: bool = False):
         """Receive actions from the policy server"""
@@ -375,10 +432,13 @@ class RobotClient:
             timed_action = self.action_queue.get_nowait()
         get_end = time.perf_counter() - get_start
 
-        _performed_action = self.robot.send_action(
-            self._action_tensor_to_action_dict(timed_action.get_action())
-        )
-        print(f"Performed action #{self._action_tensor_to_action_dict(timed_action.get_action())}")
+        # Convert action tensor to dict for inspection/sending
+        action_dict = self._action_tensor_to_action_dict(timed_action.get_action())
+
+        # Record action to rosbag if available (no-op: we don't record joint states anymore)
+
+        _performed_action = self.robot.send_action(action_dict)
+        # print(f"Performed action #{action_dict}")
         with self.latest_action_lock:
             self.latest_action = timed_action.get_timestep()
 
@@ -428,6 +488,72 @@ class RobotClient:
                 current_queue_size = self.action_queue.qsize()
 
             _ = self.send_observation(observation)
+            # Record images (only) to rosbag if available. Map specific observation keys to desired compressed topics.
+            try:
+                if self.bag is not None and CompressedImage is not None and cv2 is not None:
+                    # mapping from observation keys to rosbag compressed-topic names
+                    mapping = {
+                        'head_left_rgb': '/hdas/camera_head/left_raw/image_raw_color/compressed',
+                        'head_right_rgb': '/hdas/camera_head/right_raw/image_raw_color/compressed',
+                        'left_wrist_rgb': '/hdas/camera_wrist_left/color/image_raw/compressed',
+                        'right_wrist_rgb': '/hdas/camera_wrist_right/color/image_raw/compressed',
+                        # fallback/default camera topic keys
+                        'image': '/camera/color/image_raw/compressed',
+                        'rgb': '/camera/color/image_raw/compressed',
+                        'color': '/camera/color/image_raw/compressed',
+                    }
+
+                    for key, topic in mapping.items():
+                        if key not in raw_observation:
+                            continue
+                        img_val = raw_observation[key]
+                        # only handle numpy image arrays
+                        if not isinstance(img_val, (np.ndarray,)):
+                            continue
+
+                        # If the observation key suggests the image is RGB (naming includes 'rgb'), convert to BGR
+                        img_to_encode = img_val
+                        # if isinstance(key, str) and 'rgb' in key.lower():
+                        #     try:
+                        #         img_to_encode = cv2.cvtColor(img_val, cv2.COLOR_RGB2BGR)
+                        #     except Exception:
+                        #         # fallback to original if conversion fails
+                        #         img_to_encode = img_val
+
+                        try:
+                            ok, buf = cv2.imencode('.jpg', img_to_encode)
+                            if not ok:
+                                self.logger.debug(f"cv2.imencode failed for key {key}")
+                                continue
+
+                            comp = CompressedImage()
+                            comp.format = 'jpeg'
+                            comp.data = buf.tobytes()
+                            # set header stamp/frame
+                            try:
+                                from std_msgs.msg import Header  # type: ignore
+
+                                comp.header = Header()
+                                comp.header.stamp = (
+                                    rospy.Time.from_sec(observation.get_timestamp()) if rospy is not None else None
+                                )
+                                comp.header.frame_id = topic.split('/')[1] if '/' in topic else 'camera'
+                            except Exception:
+                                comp.header = None
+
+                            with self.bag_lock:
+                                try:
+                                    if comp.header is not None and getattr(comp.header, 'stamp', None) is not None:
+                                        self.bag.write(topic, comp, t=comp.header.stamp)
+                                    else:
+                                        self.bag.write(topic, comp)
+                                    self.logger.debug(f"Wrote CompressedImage to bag topic {topic} for key {key}")
+                                except Exception as e:
+                                    self.logger.debug(f"Failed to write CompressedImage to {topic}: {e}")
+                        except Exception as e:
+                            self.logger.debug(f"Failed to compress/write image for key {key}: {e}")
+            except Exception as e:
+                self.logger.debug(f"Error while recording observation to bag: {e}")
 
             self.logger.debug(f"QUEUE SIZE: {current_queue_size} (Must go: {observation.must_go})")
             if observation.must_go:
@@ -451,9 +577,10 @@ class RobotClient:
             return raw_observation
 
         except Exception as e:
-            self.logger.error(f"Error in observation sender: {e}")
+            print(f"Error in observation sender: {e}")
+            return
 
-    def control_loop(self, task: str, verbose: bool = False) -> tuple[Observation, Action]:
+    def control_loop(self, task: str, verbose: bool = False):
         """Combined function for executing actions and streaming observations"""
         # Wait at barrier for synchronized start
         self.start_barrier.wait()
@@ -488,11 +615,34 @@ def async_client(cfg: RobotClientConfig):
 
     client = RobotClient(cfg)
 
+    # Register signal handlers to ensure we shutdown gracefully and close rosbag files.
+    def _signal_handler(signum, frame):
+        try:
+            client.logger.info(f"Received signal {signum}; shutting down client gracefully...")
+        except Exception:
+            print(f"Received signal {signum}; shutting down client gracefully...")
+        # This will trigger stop() and let finally-block handle cleanup as well.
+        try:
+            client.stop()
+        except Exception:
+            pass
+        # Exit the process — allow outer finally to run when possible.
+        try:
+            sys.exit(0)
+        except SystemExit:
+            # If sys.exit didn't terminate immediately, force exit
+            os._exit(0)
+
+    # catch common termination signals (SIGINT: Ctrl+C, SIGTERM: kill)
+    signal.signal(signal.SIGINT, _signal_handler)
+    signal.signal(signal.SIGTERM, _signal_handler)
+
     if client.start():
         client.logger.info("Starting action receiver thread...")
 
         # Create and start action receiver thread
-        action_receiver_thread = threading.Thread(target=client.receive_actions, daemon=True)
+        # Make the receiver thread non-daemon so we can join it during shutdown.
+        action_receiver_thread = threading.Thread(target=client.receive_actions, daemon=False)
 
         # Start action receiver thread
         action_receiver_thread.start()

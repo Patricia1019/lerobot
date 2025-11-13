@@ -177,3 +177,8 @@ outputs/
 *.urdf
 *.xml
 *.part
+
+
+# ignore all files in these folders
+VLA-experiments/videos/
+recordings/

@@ -45,8 +45,14 @@ When implementing a new policy class (e.g. `DiffusionPolicy`) follow these steps
 """
 
 import itertools
+import os
+import logging
 
 from lerobot.__version__ import __version__  # noqa: F401
+
+if not os.getenv("LEROBOT_SHOW_INFO_LOGS"):
+    # Disable all logging calls with severity <= INFO (i.e. DEBUG and INFO)
+    logging.disable(logging.INFO)
 
 # TODO(rcadene): Improve policies and envs. As of now, an item in `available_policies`
 # refers to a yaml file AND a modeling name. Same for `available_envs` which refers to
