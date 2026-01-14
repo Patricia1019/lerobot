@@ -60,6 +60,12 @@ def make_robot_from_config(config: RobotConfig) -> Robot:
         from tests.mocks.mock_robot import MockRobot
 
         return MockRobot(config)
+
+    elif config.type == "kinova_gen3":
+        from .kinova_gen3 import KinovaGen3
+        
+        return KinovaGen3(config)
+        
     else:
         try:
             return cast(Robot, make_device_from_device_class(config))
