@@ -37,6 +37,8 @@ from lerobot.robots.robot import Robot
 from lerobot.utils.constants import OBS_IMAGES, OBS_STATE, OBS_STR
 from lerobot.utils.utils import init_logging
 
+import pdb
+
 Action = torch.Tensor
 
 # observation as received from the robot

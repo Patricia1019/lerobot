@@ -39,6 +39,10 @@ class KinovaGen3Config(RobotConfig):
     joint_feedback_topic: str = "/kinova_ros_control/feedback_joint_states"
     gripper_target_topic: str = "/kinova_ros_control/gripper_target"
     
+    # End-effector pose topics (for observation.state construction)
+    current_position_topic: str = "/kinova_ros_control/current_position"
+    current_angular_topic: str = "/kinova_ros_control/current_angular"
+    
     # Robot configuration
     num_joints: int = 7  # Gen3 has 7 DOF
     has_gripper: bool = True  # Set to False if no gripper
@@ -55,6 +59,15 @@ class KinovaGen3Config(RobotConfig):
     # ROS image topics (color)
     wrist_cam_topic: str = "/wrist_cam/camera/color/image_raw"
     fixed_cam_topic: str = "/fixed_cam/camera/color/image_raw"
+    
+    # Observation dimensions (from feature spec)
+    # observation.state: 16 elements (3 position + 6 orientation + 7 joints)
+    # observation.gripper: 1 element
+    # observation.images.wrist_cam: (480, 640, 3)
+    # observation.images.fixed_cam: (480, 640, 3)
+    
+    # Action dimensions (from feature spec)
+    # action: 7 delta joint commands (relative to current position)
     
     # Control loop frequency (from your ros_joint.py LOOP_HZ)
     control_frequency: float = 10.0  # Hz

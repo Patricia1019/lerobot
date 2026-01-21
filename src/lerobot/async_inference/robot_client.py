@@ -56,6 +56,7 @@ from lerobot.robots import (  # noqa: F401
     make_robot_from_config,
     so100_follower,
     so101_follower,
+    kinova_gen3
 )
 from lerobot.transport import (
     services_pb2,  # type: ignore
@@ -77,7 +78,7 @@ from .helpers import (
     map_robot_keys_to_lerobot_features,
     visualize_action_queue_size,
 )
-
+import pdb
 
 class RobotClient:
     prefix = "robot_client"
@@ -197,6 +198,7 @@ class RobotClient:
         self.logger.debug(f"Observation serialization time: {serialize_time:.6f}s")
 
         try:
+            # pdb.set_trace()
             observation_iterator = send_bytes_in_chunks(
                 observation_bytes,
                 services_pb2.Observation,

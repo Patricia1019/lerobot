@@ -41,7 +41,6 @@ from .config_kinova_gen3 import KinovaGen3Config
 import rospy
 from std_msgs.msg import Float64MultiArray
 from sensor_msgs.msg import JointState
-from geometry_msgs.msg import Point, Quaternion
 import pdb
 
 logger = logging.getLogger(__name__)
@@ -71,15 +70,11 @@ class KinovaGen3(Robot):
         self.pub_joint_target = None
         self.pub_gripper_target = None
         self.sub_joint_feedback = None
-        self.sub_current_position = None
-        self.sub_current_angular = None
         
 
         # Current joint positions (thread-safe)
         self.current_joint_positions: Optional[float] = None
         self.current_gripper_position: Optional[float] = None
-        self.current_position: Optional[np.ndarray] = None  # 3D position from ROS topic
-        self.current_orientation: Optional[np.ndarray] = None  # quaternion from ROS topic
         self.joint_lock = threading.Lock()
 
         # Connection status
@@ -94,8 +89,8 @@ class KinovaGen3(Robot):
 
         # Default image shapes (height, width, channels) until first frame arrives
         self._camera_shapes: dict[str, tuple[int, int, int]] = {
-            "wrist_cam": (480, 640, 3),
-            "fixed_cam": (480, 640, 3),
+            "base_0_rgb": (480, 640, 3),
+            # "fixed_cam": (480, 640, 3),
         }
 
         # Define joint names (7 DOF for Gen3)
@@ -109,54 +104,32 @@ class KinovaGen3(Robot):
             "joint_7",
         ]
 
-        self.pos_names = [
-            "pos_x",
-            "pos_y",
-            "pos_z"
-        ]
-
-        self.ori_names = [
-            "ori_1",
-            "ori_2",
-            "ori_3",
-            "ori_4",
-            "ori_5",
-            "ori_6"
-        ]
+        # Add gripper if configured
+        if config.has_gripper:
+            self.joint_names.append("gripper")
 
     @property
     def _motors_ft(self) -> dict[str, type]:
         """Motor features - one position value per joint."""
-        motor_dict = {}
-        for pos in self.pos_names:
-            motor_dict[f"{pos}"] = float
-        for ori in self.ori_names:
-            motor_dict[f"{ori}"] = float
-        for joint in self.joint_names:
-            motor_dict[f"{joint}"] = float
-        # Add gripper if configured !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
-        if self.config.has_gripper:
-            motor_dict["gripper"] = float
-        return motor_dict
+        return {f"{joint}.pos": float for joint in self.joint_names}
 
     @property
     def _cameras_ft(self) -> dict[str, tuple]:
         """Camera features - image dimensions for each camera."""
         return {
-            "wrist_cam": self._camera_shapes["wrist_cam"],
-            "fixed_cam": self._camera_shapes["fixed_cam"],
+            "base_0_rgb": self._camera_shapes["base_0_rgb"],
+            # "fixed_cam": self._camera_shapes["fixed_cam"],
         }
 
     @cached_property
     def observation_features(self) -> dict[str, type | tuple]:
         """Observation features returned by get_observation()."""
         return {**self._motors_ft, **self._cameras_ft}
-        # return self.get_observation()
 
     @cached_property
     def action_features(self) -> dict[str, type]:
         """Action features expected by send_action()."""
-        return {f"{joint}.pos": float for joint in self.joint_names}
+        return self._motors_ft
 
     def _joint_state_callback(self, msg: JointState):
         with self.joint_lock:
@@ -182,43 +155,6 @@ class KinovaGen3(Robot):
 
                 if gripper_val is not None:
                     self.current_gripper_position = gripper_val
-
-    def _current_position_callback(self, msg: Point):
-        """Callback for current_position topic (3D position)."""
-        with self.joint_lock:
-            self.current_position = np.array([msg.x, msg.y, msg.z], dtype=np.float32)
-
-    def _current_angular_callback(self, msg: Quaternion):
-        """Callback for current_angular topic (quaternion orientation)."""
-        with self.joint_lock:
-            self.current_orientation = np.array([msg.x, msg.y, msg.z, msg.w], dtype=np.float32)
-
-    @staticmethod
-    def _quaternion_to_6d_rotation(quat: np.ndarray) -> np.ndarray:
-        """
-        Convert quaternion (4D) to 6D rotation representation.
-        
-        Args:
-            quat: quaternion [x, y, z, w]
-        
-        Returns:
-            6D rotation representation [a1, a2, a3, b1, b2, b3]
-        """
-        from scipy.spatial.transform import Rotation
-        
-        quat = np.array(quat).flatten()
-        
-        # Normalize quaternion
-        quat = quat / (np.linalg.norm(quat) + 1e-8)
-        
-        # Convert to rotation matrix
-        rot = Rotation.from_quat(quat)
-        rot_matrix = rot.as_matrix()  # 3x3 rotation matrix
-        
-        # Extract first two columns (6D representation)
-        rot_6d = rot_matrix[:, :2].flatten()  # [a1, a2, a3, b1, b2, b3]
-        
-        return rot_6d.astype(np.float32)
 
 
     @staticmethod
@@ -347,22 +283,6 @@ class KinovaGen3(Robot):
             if self.config.has_gripper:
                 logger.info(f"Gripper target: {self.config.gripper_target_topic}")
 
-            # Setup ROS subscribers for end-effector pose
-            self.sub_current_position = rospy.Subscriber(
-                self.config.current_position_topic,
-                Point,
-                self._current_position_callback,
-                queue_size=1,
-            )
-            self.sub_current_angular = rospy.Subscriber(
-                self.config.current_angular_topic,
-                Quaternion,
-                self._current_angular_callback,
-                queue_size=1,
-            )
-            logger.info(f"Subscribed to position: {self.config.current_position_topic}")
-            logger.info(f"Subscribed to orientation: {self.config.current_angular_topic}")
-
             # Wait for joint feedback
             logger.info("Waiting for joint feedback...")
             rate = rospy.Rate(10.0)
@@ -397,7 +317,7 @@ class KinovaGen3(Robot):
                         self._latest_wrist_image = img
 
                     h, w = img.shape[:2]
-                    self._camera_shapes["wrist_cam"] = (h, w, 3)
+                    self._camera_shapes["base_0_rgb"] = (h, w, 3)
                 except Exception as e:
                     logger.warning(f"Wrist image callback error: {e}")
 
@@ -412,7 +332,7 @@ class KinovaGen3(Robot):
                         self._latest_fixed_image = img
 
                     h, w = img.shape[:2]
-                    self._camera_shapes["fixed_cam"] = (h, w, 3)
+                    # self._camera_shapes["fixed_cam"] = (h, w, 3)
                 except Exception as e:
                     logger.warning(f"Fixed image callback error: {e}")
 
@@ -445,39 +365,26 @@ class KinovaGen3(Robot):
 
     def get_observation(self) -> dict[str, Any]:
         """
-        Get current robot state and camera images. The key in get_observation() should match the feature specificaion.
+        Get current robot state and camera images.
 
         Returns:
-            Dictionary matching feature spec:
-            - observation.images.wrist_cam: (480, 640, 3) uint8 image
-            - observation.images.fixed_cam: (480, 640, 3) uint8 image
-            - observation.state: (16,) float32 = [3 position + 6 orientation + 7 joints]
-            - observation.gripper: (1,) float32 if has_gripper
+            Dictionary with joint positions (radians) and camera images (RGB uint8).
+            If no frame has arrived yet, returns a zero-image with the default/last-known shape.
         """
         if not self.is_connected:
             raise DeviceNotConnectedError(f"{self} is not connected.")
 
         obs_dict: dict[str, Any] = {}
 
-        # Read joint positions and end-effector pose
+        # Read joint positions
         start = time.perf_counter()
         with self.joint_lock:
             if self.current_joint_positions is None:
                 raise RuntimeError("No joint feedback received")
             joint_pos = self.current_joint_positions.copy()
-            
-            # Get current position and orientation from ROS topics
-            if self.current_position is not None:
-                position = self.current_position.copy()
-            else:
-                logger.warning("No current_position received, using zeros")
-                position = np.zeros(3, dtype=np.float32)
-            
-            if self.current_orientation is not None:
-                orientation_quat = self.current_orientation.copy()
-            else:
-                logger.warning("No current_orientation received, using identity quaternion")
-                orientation_quat = np.array([0, 0, 0, 1], dtype=np.float32)
+
+        for i, joint_name in enumerate(self.joint_names[:7]):
+            obs_dict[f"{joint_name}.pos"] = float(joint_pos[i])
 
         dt_ms = (time.perf_counter() - start) * 1e3
         logger.debug(f"{self} read joint state: {dt_ms:.1f}ms")
@@ -488,43 +395,20 @@ class KinovaGen3(Robot):
             fixed = None if self._latest_fixed_image is None else self._latest_fixed_image.copy()
 
         if wrist is None:
-            h, w, c = self._camera_shapes["wrist_cam"]
+            h, w, c = self._camera_shapes["base_0_rgb"]
             wrist = np.zeros((h, w, c), dtype=np.uint8)
         if fixed is None:
-            h, w, c = self._camera_shapes["fixed_cam"]
-            fixed = np.zeros((h, w, c), dtype=np.uint8)
+            pass
+            # h, w, c = self._camera_shapes["fixed_cam"]
+            # fixed = np.zeros((h, w, c), dtype=np.uint8)
 
-        obs_dict["wrist_cam"] = wrist
-        obs_dict["fixed_cam"] = fixed
-
-        # Build observation.state: 16 elements
-        # [3 position + 6 orientation + 7 joints]
-        # Position from /kinova_ros_control/current_position (3D)
-        # Orientation from /kinova_ros_control/current_angular (quaternion -> 6D rotation)
-        # Joints from joint feedback (7D)
-        
-        # Convert quaternion to 6D rotation representation
-        orientation_6d = self._quaternion_to_6d_rotation(orientation_quat)
-        
-        # Concatenate: position (3) + orientation_6d (6) + joints (7) = 16
-        # state = np.concatenate([
-        #     position,           # 3D position
-        #     orientation_6d,     # 6D orientation
-        #     joint_pos[:7]       # 7D joint positions
-        # ]).astype(float)
-        
-        # obs_dict["state"] = state
-        for i, pos_name in enumerate(self.pos_names):
-            obs_dict[pos_name] = float(position[i])
-        for i, ori_name in enumerate(self.ori_names):
-            obs_dict[ori_name] = float(orientation_6d[i])
-        for i, joint_name in enumerate(self.joint_names[:7]):
-            obs_dict[joint_name] = float(joint_pos[i])
-
+        # obs_dict["wrist"] = wrist
+        obs_dict["base_0_rgb"] = wrist # for debugging
+        # obs_dict["fixed_cam"] = fixed
 
         if self.config.has_gripper:
-            gripper_val = float(self.current_gripper_position) if self.current_gripper_position is not None else 0.0
-            obs_dict["gripper"] = gripper_val
+            obs_dict["gripper.pos"] = float(self.current_gripper_position) if self.current_gripper_position is not None else 0.0
+
 
         return obs_dict
 
@@ -755,14 +639,6 @@ class KinovaGen3(Robot):
             if self.sub_joint_feedback is not None:
                 self.sub_joint_feedback.unregister()
                 self.sub_joint_feedback = None
-
-            if self.sub_current_position is not None:
-                self.sub_current_position.unregister()
-                self.sub_current_position = None
-
-            if self.sub_current_angular is not None:
-                self.sub_current_angular.unregister()
-                self.sub_current_angular = None
 
             if self.sub_wrist_image is not None:
                 self.sub_wrist_image.unregister()

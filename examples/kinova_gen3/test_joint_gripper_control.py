@@ -1,12 +1,65 @@
 #!/usr/bin/env python3
 """
 Test script for KINOVA Gen3 joint and gripper control via ROS.
-Tests both joint positions and gripper open/close commands.
+Tests trajectory execution similar to ros_joint.py: HOME -> SUBGOAL -> TARGET -> SUBGOAL -> HOME
 """
 
 import time
 import numpy as np
+from scipy.interpolate import CubicSpline
 from lerobot.robots.kinova_gen3 import KinovaGen3, KinovaGen3Config
+
+# Define trajectory waypoints (same as ros_joint.py)
+HOME_ANGLE_RAD = np.array([5.537776947021484, 0.36067965626716614, 2.6596689224243164, 
+                           4.500516891479492, 0.29103657603263855, 5.156563758850098, 
+                           0.20305243134498596], dtype=float)
+
+SUBGOAL_ANGLE_RAD = np.array([5.8246331214904785, 1.1113364696502686, 2.85727858543396, 
+                               4.989912509918213, 0.505342960357666, 5.460690021514893, 
+                               0.5903300046920776], dtype=float)
+
+TARGET_ANGLE_RAD = np.array([5.817646503448486, 1.1553007364273071, 2.8702352046966553, 
+                              4.999231815338135, 0.5153821110725403, 5.49638557434082, 
+                              0.5797866582870483], dtype=float)
+
+NUM_WAYPOINTS = 5
+
+
+def generate_spline_trajectory(start_joint_rad, end_joint_rad, num_points=NUM_WAYPOINTS):
+    """Generate smooth joint trajectory using cubic spline interpolation (from ros_joint.py)."""
+    trajectory = []
+    
+    for joint_idx in range(7):
+        start_angle = start_joint_rad[joint_idx]
+        end_angle = end_joint_rad[joint_idx]
+        
+        # Calculate shortest path (handle wrap-around)
+        diff = end_angle - start_angle
+        if diff > np.pi:
+            diff -= 2 * np.pi
+        elif diff < -np.pi:
+            diff += 2 * np.pi
+        
+        # Create interpolation points
+        t = np.linspace(0, 1, num_points)
+        angles = start_angle + diff * t
+        angles = np.mod(angles, 2 * np.pi)
+        trajectory.append(angles)
+    
+    # Transpose to get waypoints
+    waypoints = np.array(trajectory).T
+    
+    # Apply cubic spline smoothing
+    t_points = np.linspace(0, 1, num_points)
+    smoothed_waypoints = []
+    
+    for joint_idx in range(7):
+        cs = CubicSpline(t_points, waypoints[:, joint_idx], bc_type='natural')
+        smoothed = cs(t_points)
+        smoothed = np.mod(smoothed, 2 * np.pi)
+        smoothed_waypoints.append(smoothed)
+    
+    return np.array(smoothed_waypoints).T
 
 
 def print_section(title):
@@ -38,121 +91,128 @@ def print_observation(obs, label="Observation"):
             print(f"  {cam} shape: {shape}")
 
 
-def test_joint_movement(robot):
-    """Test basic joint movement."""
-    print_section("Test 1: Joint Position Reading")
+def test_home_position(robot):
+    """Step 1: Move to HOME position."""
+    print_section("Step 1: Open Gripper & Move to HOME")
     
     obs = robot.get_observation()
     print_observation(obs, "Initial observation")
     
-    current_pos = np.array([obs.get(f"joint_{i}.pos", 0.0) for i in range(1, 8)])
+    print("\nOpening gripper...")
+    action_dict = {f"joint_{i}.pos": float(HOME_ANGLE_RAD[i-1]) for i in range(1, 8)}
+    action_dict["gripper.pos"] = 0.0  # Open
+    robot.send_action(action_dict, loop_hz=10.0)
+    time.sleep(0.3)
     
-    # Small movement on joint 1
-    print("\nMoving joint 1 by +0.1 radians...")
-    target_pos = current_pos.copy()
-    target_pos[0] += 0.1
-    
-    action_dict = {f"joint_{i}.pos": float(target_pos[i-1]) for i in range(1, 8)}
-    
-    print(f"Sending action dict with {len(action_dict)} joints")
-    robot.send_action(action_dict, wait=False, loop_hz=10.0)
-    
-    print("Waiting 2 seconds...")
-    time.sleep(2.0)
+    print("\nMoving to HOME position...")
+    robot.move_to_joint_position(HOME_ANGLE_RAD, position_name="HOME", tolerance_deg=0.8, timeout=30.0, loop_hz=10.0)
     
     obs = robot.get_observation()
-    print_observation(obs, "After joint movement")
-    
+    print_observation(obs, "At HOME position")
     return True
 
 
-def test_gripper_control(robot):
-    """Test gripper open/close."""
-    print_section("Test 2: Gripper Control")
+def test_home_to_subgoal_trajectory(robot):
+    """Step 2: Generate and execute trajectory from HOME to SUBGOAL."""
+    print_section("Step 2: Trajectory from HOME to SUBGOAL")
+    
+    num_intermediate_points = NUM_WAYPOINTS - 3
+    home_to_subgoal_sequence = generate_spline_trajectory(HOME_ANGLE_RAD, SUBGOAL_ANGLE_RAD, num_intermediate_points + 2)
+    
+    print(f"\nGenerated {len(home_to_subgoal_sequence)} waypoints using cubic spline")
+    print(f"First waypoint (deg): {np.rad2deg(home_to_subgoal_sequence[0]).tolist()}")
+    print(f"Last waypoint (deg): {np.rad2deg(home_to_subgoal_sequence[-1]).tolist()}")
+    
+    print("\nExecuting trajectory (HOME -> SUBGOAL)...")
+    for i, waypoint in enumerate(home_to_subgoal_sequence):
+        action_dict = {f"joint_{j}.pos": float(waypoint[j-1]) for j in range(1, 8)}
+        robot.send_action(action_dict, wait=False, loop_hz=10.0)
+        if (i + 1) % 2 == 0:
+            print(f"  Waypoint {i+1}/{len(home_to_subgoal_sequence)}")
+        time.sleep(0.1)
+    
+    print("\nMoving to SUBGOAL position...")
+    robot.move_to_joint_position(SUBGOAL_ANGLE_RAD, position_name="SUBGOAL", tolerance_deg=0.8, timeout=30.0, loop_hz=10.0)
     
     obs = robot.get_observation()
-    gripper_init = obs.get("gripper.pos", None)
-    print(f"\nInitial gripper position: {gripper_init}")
-    
-    # Close gripper
-    print("\n[Step 1] Closing gripper (sending gripper.pos = 1.0)...")
-    print("Watch the gripper_target topic in another terminal for messages")
-    
-    robot.send_action({"gripper.pos": 1.0}, wait=False, loop_hz=10.0)
-    print("Gripper close command sent!")
-    time.sleep(2.0)
-    
-    obs = robot.get_observation()
-    gripper_closed = obs.get("gripper.pos", None)
-    print(f"Gripper position after close attempt: {gripper_closed}")
-    
-    # Open gripper
-    print("\n[Step 2] Opening gripper (sending gripper.pos = 0.0)...")
-    robot.send_action({"gripper.pos": 0.0}, wait=False, loop_hz=10.0)
-    print("Gripper open command sent!")
-    time.sleep(2.0)
-    
-    obs = robot.get_observation()
-    gripper_open = obs.get("gripper.pos", None)
-    print(f"Gripper position after open attempt: {gripper_open}")
-    
+    print_observation(obs, "At SUBGOAL position")
     return True
 
 
-def test_combined_control(robot):
-    """Test joint and gripper control together."""
-    print_section("Test 3: Combined Joint + Gripper Control")
+def test_subgoal_to_target_trajectory(robot):
+    """Step 3: Generate and execute trajectory from SUBGOAL to TARGET."""
+    print_section("Step 3: Trajectory from SUBGOAL to TARGET")
+    
+    num_intermediate_points = NUM_WAYPOINTS - 3
+    subgoal_to_target_sequence = generate_spline_trajectory(SUBGOAL_ANGLE_RAD, TARGET_ANGLE_RAD, num_intermediate_points + 2)
+    
+    print(f"\nGenerated {len(subgoal_to_target_sequence)} waypoints")
+    
+    print("Executing trajectory (SUBGOAL -> TARGET)...")
+    for i, waypoint in enumerate(subgoal_to_target_sequence):
+        action_dict = {f"joint_{j}.pos": float(waypoint[j-1]) for j in range(1, 8)}
+        robot.send_action(action_dict, wait=False, loop_hz=10.0)
+        if (i + 1) % 2 == 0:
+            print(f"  Waypoint {i+1}/{len(subgoal_to_target_sequence)}")
+        time.sleep(0.1)
+    
+    print("\nMoving to TARGET position (strict tolerance)...")
+    robot.move_to_joint_position_strict(TARGET_ANGLE_RAD, position_name="TARGET", tolerance_deg=0.5, timeout=30.0, loop_hz=10.0)
+    
+    print("\nClosing gripper at TARGET...")
+    action_dict = {f"joint_{i}.pos": float(TARGET_ANGLE_RAD[i-1]) for i in range(1, 8)}
+    action_dict["gripper.pos"] = 1.0  # Close
+    robot.send_action(action_dict, wait=False, loop_hz=10.0)
+    time.sleep(1.0)
     
     obs = robot.get_observation()
-    current_pos = np.array([obs.get(f"joint_{i}.pos", 0.0) for i in range(1, 8)])
-    
-    print("\nSending combined action (move joint 2 + close gripper)...")
-    
-    target_pos = current_pos.copy()
-    target_pos[1] += 0.05  # Move joint 2 slightly
-    
-    action_dict = {f"joint_{i}.pos": float(target_pos[i-1]) for i in range(1, 8)}
-    action_dict["gripper.pos"] = 1.0  # Close gripper
-    
-    print(f"Action keys: {list(action_dict.keys())}")
-    robot.send_action(action_dict, wait=False, loop_hz=10.0)
-
-    action_dict["gripper.pos"] = 0.0 # Open gripper after closing
-    robot.send_action(action_dict, wait=False, loop_hz=10.0)
-    
-    print("Combined action sent!")
-    time.sleep(2.0)
-    
-    obs = robot.get_observation()
-    print_observation(obs, "After combined action")
-    
+    print_observation(obs, "At TARGET with gripper closed")
     return True
 
 
-def test_monitoring(robot):
-    """Test continuous monitoring of robot state."""
-    print_section("Test 4: Continuous Monitoring")
+def test_return_to_home(robot):
+    """Step 4: Return from TARGET to SUBGOAL to HOME using reverse paths."""
+    print_section("Step 4: Return to HOME (reverse paths)")
     
-    print("\nMonitoring robot state for 5 seconds...\n")
+    num_intermediate_points = NUM_WAYPOINTS - 3
+    subgoal_to_target_sequence = generate_spline_trajectory(SUBGOAL_ANGLE_RAD, TARGET_ANGLE_RAD, num_intermediate_points + 2)
+    target_to_subgoal_sequence = subgoal_to_target_sequence[::-1]
     
-    start_time = time.time()
-    count = 0
+    print("\nExecuting reverse trajectory (TARGET -> SUBGOAL)...")
+    for i, waypoint in enumerate(target_to_subgoal_sequence):
+        action_dict = {f"joint_{j}.pos": float(waypoint[j-1]) for j in range(1, 8)}
+        action_dict["gripper.pos"] = 1.0  # Keep closed
+        robot.send_action(action_dict, wait=False, loop_hz=10.0)
+        if (i + 1) % 2 == 0:
+            print(f"  Waypoint {i+1}/{len(target_to_subgoal_sequence)}")
+        time.sleep(0.1)
     
-    while (time.time() - start_time) < 5.0:
-        obs = robot.get_observation()
-        
-        joints = [obs.get(f"joint_{i}.pos", 0.0) for i in range(1, 8)]
-        joints_deg = np.rad2deg(joints)
-        gripper = obs.get("gripper.pos", None)
-        
-        gripper_str = f"gripper={gripper:.2f}" if gripper is not None else "gripper=N/A"
-        
-        print(f"[{count:2d}] Joints (deg): [{', '.join(f'{j:6.1f}' for j in joints_deg)}] | {gripper_str}")
-        
-        time.sleep(0.5)
-        count += 1
+    print("\nMoving to SUBGOAL position...")
+    robot.move_to_joint_position(SUBGOAL_ANGLE_RAD, position_name="SUBGOAL", tolerance_deg=0.8, timeout=30.0, loop_hz=10.0)
     
-    print("\nMonitoring complete!")
+    home_to_subgoal_sequence = generate_spline_trajectory(HOME_ANGLE_RAD, SUBGOAL_ANGLE_RAD, num_intermediate_points + 2)
+    subgoal_to_home_sequence = home_to_subgoal_sequence[::-1]
+    
+    print("\nExecuting reverse trajectory (SUBGOAL -> HOME)...")
+    for i, waypoint in enumerate(subgoal_to_home_sequence):
+        action_dict = {f"joint_{j}.pos": float(waypoint[j-1]) for j in range(1, 8)}
+        action_dict["gripper.pos"] = 1.0  # Keep closed
+        robot.send_action(action_dict, wait=False, loop_hz=10.0)
+        if (i + 1) % 2 == 0:
+            print(f"  Waypoint {i+1}/{len(subgoal_to_home_sequence)}")
+        time.sleep(0.1)
+    
+    print("\nMoving to HOME position...")
+    robot.move_to_joint_position(HOME_ANGLE_RAD, position_name="HOME", tolerance_deg=0.8, timeout=30.0, loop_hz=10.0)
+    
+    print("\nOpening gripper at HOME...")
+    action_dict = {f"joint_{i}.pos": float(HOME_ANGLE_RAD[i-1]) for i in range(1, 8)}
+    action_dict["gripper.pos"] = 0.0  # Open
+    robot.send_action(action_dict, wait=False, loop_hz=10.0)
+    time.sleep(1.0)
+    
+    obs = robot.get_observation()
+    print_observation(obs, "Back at HOME with gripper open")
     return True
 
 
@@ -186,18 +246,20 @@ def main():
         return False
     
     try:
-        # Run all tests
-        test_joint_movement(robot)
-        test_gripper_control(robot)
-        test_combined_control(robot)
-        test_monitoring(robot)
+        # Run trajectory tests
+        test_home_position(robot)
+        test_home_to_subgoal_trajectory(robot)
+        test_subgoal_to_target_trajectory(robot)
+        test_return_to_home(robot)  # Steps 4-9: Commented out - return path
         
-        print_section("All Tests Complete")
+        print_section("Tests Complete")
         print("\n✓ Test suite completed!")
-        print("\nNote: If gripper didn't respond, check:")
-        print("  1. ROS controller is running (roslaunch kinova_ros_control ...)")
-        print("  2. Monitor /kinova_ros_control/gripper_target topic for messages")
-        print("  3. Check ROS logs for errors")
+        print("\nTrajectory executed:")
+        print("  1. Opened gripper, moved to HOME")
+        print("  2. Executed smooth trajectory HOME -> SUBGOAL")
+        print("  3. Executed smooth trajectory SUBGOAL -> TARGET")
+        print("  4. Closed gripper at TARGET")
+        print("\n(Steps 4-9: Return paths commented out)")
         
     except Exception as e:
         print_section("Test Failed")
